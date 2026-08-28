@@ -1,0 +1,17 @@
+# Swift Package Manager build products
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+
+# macOS
+.DS_Store
+
+# Local clone of the original project, kept alongside for reference while
+# working. It is FelixKratz/JankyBorders and GPL-3.0 licensed: not ours to
+# redistribute, and not part of this project.
+JankyBorders/
+
+# Scratch output from the offscreen render diagnostics
+/*.png
