@@ -9,12 +9,11 @@ final class BorderManager {
     private var borders: [UInt32: BorderWindow] = [:]
     private var ownWIDs: Set<UInt32> = []
     private var focusedWID: UInt32 = 0
-    private var appNameCache: [pid_t: String] = [:]
     private var focusGeneration: UInt64 = 0
     private var pendingSpaceReconcile = false
     private var pendingResize: Set<UInt32> = []
     private var resizeDrainScheduled = false
-    private var resizeGeneration: [UInt32: UInt64] = [:]
+    private var settleTimers: [UInt32: DispatchSourceTimer] = [:]
     /// Raw count of every window-server notification, by id. Tells us what the
     /// window server actually reports during a live resize, rather than what we
     /// assume it reports.
@@ -80,24 +79,21 @@ final class BorderManager {
 
     // MARK: - Border bookkeeping
 
-    private func appName(for wid: UInt32) -> String {
-        let pid = WS.ownerPID(wid)
-        if let cached = appNameCache[pid] { return cached }
-        // Bounded: pids are recycled and apps come and go over a long session.
-        if appNameCache.count > 512 { appNameCache.removeAll(keepingCapacity: true) }
+    private func appName(for pid: pid_t) -> String {
+        // Only queried when adopting a window. PIDs are reused, so caching a
+        // name by PID can apply an exited app's filters to its successor.
         var buf = [CChar](repeating: 0, count: 1024)
         proc_name(pid, &buf, UInt32(buf.count))
-        let name = String(cString: buf)
-        appNameCache[pid] = name
-        return name
+        return String(cString: buf)
     }
 
     @discardableResult
     private func makeBorder(for snap: WS.Snapshot, spaceID: UInt64) -> BorderWindow? {
         guard settings.enabled else { return nil }
         if let existing = borders[snap.wid] { return existing }
-        guard WS.ownerPID(snap.wid) != WS.pid else { return nil }
-        guard settings.allows(app: appName(for: snap.wid)) else { return nil }
+        let pid = WS.ownerPID(snap.wid)
+        guard pid > 0, pid != WS.pid else { return nil }
+        guard settings.allows(app: appName(for: pid)) else { return nil }
 
         let border = BorderWindow(targetWID: snap.wid)
         border.spaceID = spaceID != 0 ? spaceID : WS.spaceID(for: snap.wid)
@@ -113,7 +109,7 @@ final class BorderManager {
         ownWIDs.subtract(border.ownedWindowIDs)
         // Per-window bookkeeping has to go too, or these grow for the lifetime
         // of the process as windows come and go.
-        resizeGeneration.removeValue(forKey: wid)
+        settleTimers.removeValue(forKey: wid)?.cancel()
         pendingResize.remove(wid)
         border.destroy()
     }
@@ -173,7 +169,17 @@ final class BorderManager {
             }
 
         case WSEvent.windowUnhide:
-            borders[wid]?.show(settings: settings)
+            // Not a plain show(): a window can be repositioned or resized by
+            // its app - or by a tiling window manager, which is what actually
+            // moves windows around while they are off the active layout -
+            // while it is hidden. Re-ordering the border in at its pre-hide
+            // geometry is exactly the stuck-outline bug: the border comes
+            // back on screen, correctly stacked next to its target, at
+            // whatever position it happened to occupy before the hide.
+            if let border = borders[wid], let snap = WS.snapshot(wid) {
+                border.update(target: snap, settings: settings, focused: border.focused)
+                refreshOwnWIDsIfNeeded(border)
+            }
 
         case WSEvent.windowHide:
             borders[wid]?.hide()
@@ -214,11 +220,15 @@ final class BorderManager {
     /// because our record says it is already correct. Once per gesture, so the
     /// cost does not land on the hot path.
     private func scheduleSettle(_ wid: UInt32) {
-        let generation = (resizeGeneration[wid] ?? 0) &+ 1
-        resizeGeneration[wid] = generation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-            guard let self, self.resizeGeneration[wid] == generation,
-                  let border = self.borders[wid] else { return }
+        if let timer = settleTimers[wid] {
+            timer.schedule(deadline: .now() + 0.12)
+            return
+        }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.settleTimers.removeValue(forKey: wid)?.cancel()
+            guard let border = self.borders[wid] else { return }
             border.markNeedsResync()
             if var snap = WS.snapshot(wid, includeCornerRadius: true) {
                 snap.wid = wid
@@ -226,6 +236,9 @@ final class BorderManager {
                 self.refreshOwnWIDsIfNeeded(border)
             }
         }
+        settleTimers[wid] = timer
+        timer.schedule(deadline: .now() + 0.12)
+        timer.resume()
     }
 
     func handleSpawnEvent(_ event: UInt32, wid: UInt32, spaceID: UInt64) {
@@ -268,7 +281,12 @@ final class BorderManager {
         }
     }
 
-    func rescan() { reconcileVisibleSpaces() }
+    func rescan() {
+        WS.invalidateSpaceCache()
+        reconcileVisibleSpaces()
+        focusHintPending = true
+        refreshFocus()
+    }
 
     func resetCounters() {
         eventCounts.removeAll()
@@ -280,7 +298,6 @@ final class BorderManager {
     private func reconcileVisibleSpaces() {
         let visible = WS.visibleSpaceIDs()
         guard !visible.isEmpty else { return }
-        let visibleSet = Set(visible)
         let wids = WS.windowIDs(onSpaces: visible)
         var seen = Set<UInt32>()
 
@@ -299,8 +316,7 @@ final class BorderManager {
         // Anything we track that is not on a visible space must be ordered out,
         // otherwise it bleeds through onto the space that just came forward.
         for (wid, border) in borders where !seen.contains(wid) {
-            if border.sticky { continue }
-            if !visibleSet.contains(border.spaceID) { border.hide() }
+            if !border.sticky || !WS.isOrderedIn(wid) { border.hide() }
         }
 
         syncNotifications()
@@ -354,7 +370,7 @@ final class BorderManager {
         // focus in that case makes every border blink off, so keep the last
         // known focus until something real takes over.
         guard front != 0 else { return }
-        guard front != focusedWID || borders[front]?.focused == false else { return }
+        guard front != focusedWID || borders[front]?.focused != true else { return }
 
         let previous = focusedWID
         focusedWID = front
@@ -385,19 +401,27 @@ final class BorderManager {
     func apply(arguments: [String]) {
         // A `window=<id>` prefix scopes the rest of the message to one border.
         var targetWID: UInt32?
+        var scoped = false
         var rest: [String] = []
         for arg in arguments {
             if arg.hasPrefix("window=") {
+                scoped = true
                 targetWID = UInt32(arg.dropFirst(7))
             } else {
                 rest.append(arg)
             }
         }
 
-        if let targetWID, let border = borders[targetWID] {
+        if scoped {
+            guard let targetWID, let border = borders[targetWID] else { return }
             var overrides = border.overrides ?? settings
-            SettingsParser.apply(rest, to: &overrides)
+            let mask = SettingsParser.apply(rest, to: &overrides)
+            guard !mask.isEmpty else { return }
             border.overrides = overrides
+            if mask.contains(.recreate) {
+                border.destroy()
+                refreshOwnWIDsIfNeeded(border)
+            }
             border.invalidate()
             if let snap = WS.snapshot(targetWID) {
                 border.update(target: snap, settings: settings, focused: border.focused, force: true)

@@ -5,7 +5,9 @@ Window borders for macOS, in Swift. A reimplementation of the idea behind
 two things that make the original feel heavy: the size of the buffers it asks
 the window server for, and the amount of work it does per resize event.
 
-Verified on macOS 26.6.2 (Tahoe), Apple Silicon, Swift 6.3.
+Requires macOS 14 or later and Swift tools 6.0 or later. Use a current patched
+Xcode or Command Line Tools release. The security regression suite also runs
+with Command Line Tools alone.
 
 ## What is different
 
@@ -162,15 +164,15 @@ snappyborders --stop
 ## Options
 
 ```
-active_color=<color>      focused window          (default 0xff7aa2f7)
+active_color=<color>      focused window          (default 0xff2f9bff)
 inactive_color=<color>    unfocused windows       (default transparent)
 color=<color>             both
-width=<float>             stroke width in points  (default 3.0)
+width=<float>             stroke width in points  (default 4.0)
 padding=<float>           slack around the stroke (default 4.0)
 style=round|uniform|square
                           round follows the window's own corner radius,
                           uniform pins it to 9pt, square squares it off
-order=above|below         stack over or under the window (default below)
+order=above|below         stack over or under the window (default above)
 hidpi=on|off              render at the display's backing scale (default on)
 glow_radius=<float>       blur radius for glow() colours (default 10.0)
 blacklist="App1,App2"     never draw borders for these apps
@@ -186,13 +188,46 @@ Colours are `0xAARRGGBB`, `glow(0xAARRGGBB)`, or
 `gradient(top_left=0x...,bottom_right=0x...)` /
 `gradient(top_right=0x...,bottom_left=0x...)`.
 
-Config file, read at startup when no options are given. If it is executable it
-is run as a script; otherwise it is read as one option per line:
+Widths, padding and glow radii must be finite values from 0 through 128 points.
+`width=0` hides the border. Use `blacklist=` or `whitelist=` to clear a list.
+An invalid or untracked `window=<id>` leaves global settings unchanged.
+
+Config file, read at startup when no options are given. An executable config
+runs directly and needs a shebang such as `#!/bin/sh`; otherwise it is read as
+one option per line. The file must be owned by the current user, must not be a
+symlink, and must be at most 64 KiB. Neither the file nor its parent directories
+may be writable by other users (root-owned sticky temporary directories are
+allowed):
 
 ```
 ~/.config/snappyborders/snappybordersrc
 ~/.snappybordersrc
 ```
+
+The control socket is `/tmp/snappyborders-<uid>/control.sock`, inside a private
+directory. Both ends verify the peer's user ID. Stop an older version using its
+original binary before upgrading from the previous socket location.
+
+## Checks and dependency updates
+
+```sh
+bash .security/test-swift.sh
+python3 -B -m unittest discover -s .security -v
+python3 -B .security/check.py --advisories --require-complete --json
+swift build -c release
+```
+
+The Swift suite checks configuration trust, IPC limits and timeouts, window
+scoping, allocation bounds, and incremental rendering without XCTest or screen
+capture. Python 3.11 or later is required for the security checker; CI uses
+Python 3.15.1. See [SECURITY.md](SECURITY.md) for the audit scope and current
+runtime guidance.
+
+There are no external Swift package dependencies. CI checks that invariant,
+builds both configurations, runs the regression suites, and audits supported
+lockfiles on changes and weekly. Dependabot tracks Swift packages and the
+commit-pinned GitHub Actions. Adding a dependency requires reviewing it,
+committing its lockfile, and updating the audit configuration.
 
 ## Notes on the private API
 
@@ -271,6 +306,7 @@ them, which reads as missing edges.
 ./.build/release/sbprobe churn    # drive a running instance with window events
 ./.build/release/sbprobe drive    # 120 Hz drag + resize load, to time the daemon
 ./.build/release/sbprobe front    # break down front-window resolution
+./.build/release/sbprobe inspect <wid> # inspect geometry, visibility and spaces
 ```
 
 Because screen capture needs a permission this tool does not have, it can also

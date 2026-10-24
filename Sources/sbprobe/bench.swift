@@ -178,7 +178,7 @@ func probeBench() {
         }
     }
     if let raw = SLWindowContextCreate(cid, stripW, nil)?.takeRetainedValue() {
-        let sc = unsafeBitCast(raw, to: CGContext.self)
+        let sc = raw
         func paint() {
             sc.clear(CGRect(x: 0, y: 0, width: 1600, height: 40))
             sc.setLineWidth(4)
@@ -356,7 +356,7 @@ func probeBench() {
         print("  (SLWindowContextCreate failed - skipping CGContext comparison)")
         SLSReleaseWindow(cid, wid); return
     }
-    let ctx2 = unsafeBitCast(cgctx, to: CGContext.self)
+    let ctx2 = cgctx
     time("CGContext: clear + stroke full frame + flush", 300) {
         i += 1
         let frame = CGRect(x: 0, y: 0, width: W + Double(i % 20), height: H)

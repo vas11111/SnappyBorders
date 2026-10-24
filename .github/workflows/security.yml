@@ -1,0 +1,39 @@
+name: Build and security
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '23 12 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.15.1'
+      - name: Test security checker
+        run: python3 -B -m unittest discover -s .security -v
+      - name: Audit locked dependencies
+        run: python3 -B .security/check.py --advisories --require-complete --json
+      - name: Build and run Swift regressions
+        run: bash .security/test-swift.sh
+      - name: Release build
+        run: swift build -c release
+      - name: Verify dependency-free package
+        run: |
+          swift package dump-package > "$RUNNER_TEMP/snappyborders-package.json"
+          python3 -c 'import json, os; p = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "snappyborders-package.json"))); assert not p["dependencies"], "Review new dependencies, commit Package.resolved, and update the security audit before enabling them"'

@@ -62,7 +62,7 @@ func probeZOrder() {
         SLSSetWindowOpacity(cid, wid, false)
         SLSSetWindowAlpha(cid, wid, 1.0)
         if let raw = SLWindowContextCreate(cid, wid, nil)?.takeRetainedValue() {
-            let gc = unsafeBitCast(raw, to: CGContext.self)
+            let gc = raw
             gc.setFillColor(CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1))
             gc.fill(CGRect(x: 0, y: 0, width: 240, height: 170))
             gc.flush()

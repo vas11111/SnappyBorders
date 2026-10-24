@@ -23,6 +23,7 @@ case "drive":  probeDrive()
 case "front":  probeFront()
 case "pixels": probePixels()
 case "restack": probeRestack()
+case "inspect": probeInspect()
 default:
-    print("usage: sbprobe <bench|zorder|txn|show|churn|drive|front|pixels|restack>")
+    print("usage: sbprobe <bench|zorder|txn|show|churn|drive|front|pixels|restack|inspect>")
 }
