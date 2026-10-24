@@ -73,7 +73,7 @@ func probeShow() {
     print("B: CGContext backing store at \(bFrame)")
     let b = newWindow(bFrame, backingStore: true)
     if let raw = SLWindowContextCreate(cid, b, nil)?.takeRetainedValue() {
-        let gc = unsafeBitCast(raw, to: CGContext.self)
+        let gc = raw
         gc.setFillColor(CGColor(srgbRed: 0, green: 1, blue: 1, alpha: 1))     // cyan
         gc.fill(CGRect(origin: .zero, size: bFrame.size))
         gc.flush()

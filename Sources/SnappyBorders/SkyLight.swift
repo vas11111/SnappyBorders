@@ -80,6 +80,7 @@ enum WS {
         var level: Int32 = 0
         var bounds: CGRect = .zero
         var cornerRadius: CGFloat = 0
+        var hasCornerRadius = false
 
         static let tagDocument: UInt64      = 1 << 0
         static let tagFloating: UInt64      = 1 << 1
@@ -130,6 +131,7 @@ enum WS {
                let radii = f(it)?.takeUnretainedValue() as? [NSNumber],
                let first = radii.first {
                 s.cornerRadius = CGFloat(first.doubleValue)
+                s.hasCornerRadius = true
             }
             out.append(s)
         }
@@ -230,7 +232,6 @@ enum WS {
     // MARK: - Notifications
 
     static func requestNotifications(for wids: [UInt32]) {
-        guard !wids.isEmpty else { return }
         var list = wids
         SLSRequestNotificationsForWindows(cid, &list, Int32(list.count))
     }

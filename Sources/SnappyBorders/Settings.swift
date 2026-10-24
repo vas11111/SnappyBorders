@@ -109,6 +109,12 @@ struct UpdateMask: OptionSet {
 }
 
 enum SettingsParser {
+    /// Keep geometry finite and bound backing-store allocations from IPC/config input.
+    static func dimension(_ value: String) -> CGFloat? {
+        guard let number = Double(value), number.isFinite, (0...128).contains(number) else { return nil }
+        return CGFloat(number)
+    }
+
     static func parseColorStyle(_ value: String) -> ColorStyle? {
         if value.hasPrefix("glow(") && value.hasSuffix(")") {
             let inner = String(value.dropFirst(5).dropLast())
@@ -161,7 +167,7 @@ enum SettingsParser {
     static func apply(_ args: [String], to settings: inout Settings) -> UpdateMask {
         var mask = UpdateMask.none
         for arg in args {
-            let parts = arg.split(separator: "=", maxSplits: 1).map(String.init)
+            let parts = arg.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
             guard parts.count == 2 else { continue }
             let key = parts[0], value = parts[1]
             switch key {
@@ -174,11 +180,11 @@ enum SettingsParser {
                     settings.active = c; settings.inactive = c; mask.formUnion(.all)
                 }
             case "width":
-                if let w = Double(value), CGFloat(w) != settings.width { settings.width = CGFloat(w); mask.insert(.geometry) }
+                if let w = dimension(value), w != settings.width { settings.width = w; mask.insert(.geometry) }
             case "padding":
-                if let p = Double(value), CGFloat(p) != settings.padding { settings.padding = CGFloat(p); mask.insert(.geometry) }
+                if let p = dimension(value), p != settings.padding { settings.padding = p; mask.insert(.geometry) }
             case "glow_radius":
-                if let r = Double(value) { settings.glowRadius = CGFloat(r); mask.formUnion(.all) }
+                if let r = dimension(value), r != settings.glowRadius { settings.glowRadius = r; mask.formUnion(.all) }
             case "style":
                 let s: BorderStyle? = value == "round" ? .round
                     : value == "square" ? .square

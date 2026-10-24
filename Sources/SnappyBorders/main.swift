@@ -66,19 +66,15 @@ func runConfigFile() {
     let fm = FileManager.default
     guard let path = candidates.first(where: { fm.fileExists(atPath: $0) }) else { return }
 
-    if fm.isExecutableFile(atPath: path) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", path]
-        try? p.run()
-        return
+    switch Configuration.load(path) {
+    case .options(let args):
+        BorderManager.shared?.apply(arguments: args)
+    case .script(let url):
+        do { try Configuration.startScript(url) }
+        catch { FileHandle.standardError.write(Data("snappyborders: could not run config script\n".utf8)) }
+    case nil:
+        FileHandle.standardError.write(Data("snappyborders: config must be a regular, user-owned file without group/other write access (64 KiB maximum)\n".utf8))
     }
-    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
-    let args = text.split(separator: "\n")
-        .map { $0.trimmingCharacters(in: .whitespaces) }
-        .filter { !$0.isEmpty && !$0.hasPrefix("#") }
-    guard !args.isEmpty else { return }
-    BorderManager.shared?.apply(arguments: args)
 }
 
 func selftest() -> Int32 {
@@ -168,6 +164,8 @@ func renderTest(_ args: [String]) -> Int32 {
         default: break
         }
     }
+    guard BorderWindow.validSize(CGSize(width: w, height: h)), radius.isFinite,
+          (0...1024).contains(radius) else { print("invalid render geometry"); return 1 }
     let border = BorderWindow(targetWID: 0)
     border.focused = true
     guard let image = border.renderComposite(targetSize: CGSize(width: w, height: h),
@@ -179,7 +177,7 @@ func renderTest(_ args: [String]) -> Int32 {
         print("cannot write \(out)"); return 1
     }
     CGImageDestinationAddImage(dest, image, nil)
-    CGImageDestinationFinalize(dest)
+    guard CGImageDestinationFinalize(dest) else { print("cannot finish writing image"); return 1 }
     print("wrote \(out)  (\(image.width)x\(image.height), window \(Int(w))x\(Int(h)) radius \(Int(radius)))")
     return 0
 }
@@ -210,6 +208,8 @@ func renderSequence(_ args: [String]) -> Int32 {
         }
     }
     if sizes.isEmpty { sizes = [CGSize(width: 900, height: 600)] }
+    guard sizes.allSatisfy(BorderWindow.validSize), radius.isFinite,
+          (0...1024).contains(radius) else { print("invalid render geometry"); return 1 }
 
     let border = BorderWindow(targetWID: 0)
     border.simulated = true
@@ -219,6 +219,7 @@ func renderSequence(_ args: [String]) -> Int32 {
         snap.wid = 0
         snap.bounds = CGRect(x: 0, y: 0, width: size.width, height: size.height)
         snap.cornerRadius = radius
+        snap.hasCornerRadius = true
         border.update(target: snap, settings: settings, focused: true)
     }
     guard let image = border.composite() else { print("composite failed"); return 1 }
@@ -227,7 +228,7 @@ func renderSequence(_ args: [String]) -> Int32 {
         print("cannot write \(out)"); return 1
     }
     CGImageDestinationAddImage(dest, image, nil)
-    CGImageDestinationFinalize(dest)
+    guard CGImageDestinationFinalize(dest) else { print("cannot finish writing image"); return 1 }
     print("wrote \(out) after \(sizes.count) size(s), final \(Int(sizes.last!.width))x\(Int(sizes.last!.height))")
     return 0
 }
@@ -254,6 +255,8 @@ func renderDiff(_ args: [String]) -> Int32 {
         }
     }
     guard sizes.count >= 1 else { print("need --sizes"); return 1 }
+    guard sizes.allSatisfy(BorderWindow.validSize), radius.isFinite,
+          (0...1024).contains(radius) else { print("invalid render geometry"); return 1 }
 
     func render(_ seq: [CGSize]) -> CGImage? {
         let b = BorderWindow(targetWID: 0)
@@ -263,6 +266,7 @@ func renderDiff(_ args: [String]) -> Int32 {
             var snap = WS.Snapshot()
             snap.bounds = CGRect(origin: .zero, size: size)
             snap.cornerRadius = radius
+            snap.hasCornerRadius = true
             b.update(target: snap, settings: settings, focused: true)
         }
         return b.composite(showStripOutlines: false)
@@ -346,15 +350,11 @@ case .notRunning:
         FileHandle.standardError.write("snappyborders: not running\n".data(using: .utf8)!)
         exit(1)
     }
+case .failed(let reason):
+    FileHandle.standardError.write(Data("snappyborders: \(reason)\n".utf8))
+    exit(1)
 }
 
-// The window server only composites windows belonging to a process it knows as
-// an application. A plain CLI binary can create, order and draw into windows -
-// every call succeeds and every read-back looks right - but nothing appears.
-// Registering as a UI-element app fixes that with no Dock icon and no menu bar.
-// Doing this via NSApplication also works, but AppKit then takes over the
-// connection's event delivery and the window-server notifications we rely on
-// stop arriving; TransformProcessType leaves that path alone.
 // The window server only composites windows belonging to a process it knows as
 // an application. Registering as an accessory app gets that with no Dock icon,
 // no menu bar and no focus stealing. AppKit then owns the connection's event

@@ -120,6 +120,8 @@ final class BorderWindow {
         var width: CGFloat
         var glowRadius: CGFloat
         var radius: CGFloat
+        var debugFill: Bool
+        var gradientWidth: CGFloat = 0, gradientHeight: CGFloat = 0
         var p0: CGFloat = 0, p1: CGFloat = 0, p2: CGFloat = 0, p3: CGFloat = 0
     }
 
@@ -128,7 +130,12 @@ final class BorderWindow {
         let glow = s.glowSlack(focused ? s.active : s.inactive)
         let band = min(s.outset + radius(for: s) + s.width + glow + 2, frameSize.height / 2)
         var key = ContentKey(kind: strip.kind, style: focused ? s.active : s.inactive,
-                             width: s.width, glowRadius: s.glowRadius, radius: strokeRadius(s))
+                             width: s.width, glowRadius: s.glowRadius, radius: strokeRadius(s),
+                             debugFill: s.debugFill)
+        if case .gradient = key.style {
+            key.gradientWidth = rect.width
+            key.gradientHeight = rect.height
+        }
         let ox = strip.rect.minX, oy = strip.rect.minY
         switch strip.kind {
         case .bottom:
@@ -150,6 +157,7 @@ final class BorderWindow {
         return key
     }
     private var strips: [Strip] = []
+    private var layoutRects: [CGRect] = []
 
     var spaceID: UInt64 = 0
     var focused = false
@@ -185,6 +193,24 @@ final class BorderWindow {
 
     init(targetWID: UInt32) {
         self.targetWID = targetWID
+    }
+
+    static func validSize(_ size: CGSize) -> Bool {
+        size.width.isFinite && size.height.isFinite
+            && size.width > 0 && size.height > 0
+            && size.width <= 32768 && size.height <= 32768
+    }
+
+    private func bitmapSize(_ size: CGSize) -> (width: Int, height: Int)? {
+        guard Self.validSize(size) else { return nil }
+        let width = Int(ceil(size.width * 2)), height = Int(ceil(size.height * 2))
+        guard width * height <= 16_777_216 else { return nil } // 64 MiB per bitmap
+        return (width, height)
+    }
+
+    private func validSurface(_ size: CGSize) -> Bool {
+        size.width.isFinite && size.height.isFinite && size.width > 0 && size.height > 0
+            && size.width * size.height * scale * scale <= 67_108_864
     }
 
     var wid: UInt32 { strips.first?.wid ?? 0 }
@@ -327,6 +353,7 @@ final class BorderWindow {
     // MARK: - Lifecycle
 
     private func makeStrip(kind: StripKind, rect: CGRect, frame: CGRect) -> Strip? {
+        guard validSurface(rect.size) else { return nil }
         var strip = Strip()
         strip.kind = kind
         strip.rect = rect
@@ -358,13 +385,15 @@ final class BorderWindow {
         SLSWindowSetShadowProperties(newWID, ["com.apple.WindowShadowDensity": 0] as CFDictionary)
         if spaceID != 0 { WS.send(newWID, toSpace: spaceID) }
         strip.context = makeContext(newWID)
+        guard strip.context != nil else { SLSReleaseWindow(WS.cid, newWID); return nil }
         return strip
     }
 
     private func makeBitmap(_ size: CGSize) -> CGContext? {
+        guard let pixels = bitmapSize(size) else { return nil }
         let px = 2.0
         let ctx = CGContext(data: nil,
-                            width: max(1, Int(size.width * px)), height: max(1, Int(size.height * px)),
+                            width: pixels.width, height: pixels.height,
                             bitsPerComponent: 8, bytesPerRow: 0,
                             space: CGColorSpaceCreateDeviceRGB(),
                             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
@@ -404,6 +433,7 @@ final class BorderWindow {
             strips.append(strip)
         }
         windowFrame = frame
+        layoutRects = stripLayout(settings, frameSize: frame.size).map { $0.1 }
         needsRedraw = true
         stripsDidChange = true
         for i in strips.indices { strips[i].needsDraw = true }
@@ -417,12 +447,15 @@ final class BorderWindow {
     /// Resize path: reshape the existing strips instead of rebuilding them.
     /// Creating a window costs ~1-3 ms, so doing that per resize event is what
     /// makes a border visibly trail its window during a drag.
-    private func reshapeStrips(frame: CGRect, settings: Settings) {
+    private func reshapeStrips(frame: CGRect, settings: Settings) -> Bool {
         let layout = stripLayout(settings, frameSize: frame.size)
         guard layout.count == strips.count else {
-            _ = buildStrips(frame: frame, settings: settings)
-            return
+            return buildStrips(frame: frame, settings: settings)
         }
+        let allocations = layout.enumerated().map { index, item in
+            allocate(item.1, kind: item.0, current: strips[index].rect.size)
+        }
+        guard allocations.allSatisfy({ validSurface($0.size) }) else { hide(); return false }
         OpCounts.reshapes += 1
         // A resync repaints and restacks from the window's real bounds; it
         // deliberately keeps the existing allocation, because reshaping is the
@@ -434,19 +467,18 @@ final class BorderWindow {
         pendingResync = false
         let t0 = nowNS()
         let t = simulated ? nil : Transaction()
-        if !simulated && t == nil { return }
-        var reshaped: [Int] = []
+        if !simulated && t == nil { return false }
         for i in strips.indices {
-            let (kind, required) = layout[i]
-            let rect = allocate(required, kind: kind, current: strips[i].rect.size)
+            let kind = layout[i].0
+            let rect = allocations[i]
             let sizeChanged = rect.size != strips[i].rect.size
             strips[i].kind = kind
             if sizeChanged {
-                reshaped.append(i)
                 OpCounts.stripsReshaped += 1
                 strips[i].needsDraw = true
                 if simulated {
                     strips[i].context = makeBitmap(rect.size)
+                    guard strips[i].context != nil else { hide(); return false }
                 } else {
                     // Direct and synchronous, not through the transaction: the
                     // transaction form applies the size but ignores the origin,
@@ -472,8 +504,10 @@ final class BorderWindow {
         DrawStats.contextNS &+= t2 &- t1
         DrawStats.reshapeCount += 1
         windowFrame = frame
+        layoutRects = layout.map { $0.1 }
         needsRedraw = strips.contains { $0.needsDraw }
         if sbVerify { verifyGeometry() }
+        return true
     }
 
     /// Compares each strip's real window-server bounds against the rect it was
@@ -624,10 +658,15 @@ final class BorderWindow {
 
     func update(target: WS.Snapshot, settings: Settings, focused newFocus: Bool, force: Bool = false) {
         let s = overrides ?? settings
+        if force { invalidate() }
         if newFocus != focused { needsRedraw = true }
         focused = newFocus
+        guard s.enabled, s.width > 0, Self.validSize(target.bounds.size),
+              abs(target.bounds.origin.x) <= 1_000_000,
+              abs(target.bounds.origin.y) <= 1_000_000 else { hide(); return }
         sticky = target.isSticky
-        if target.cornerRadius > 0, target.cornerRadius != cornerRadius {
+        if target.hasCornerRadius, target.cornerRadius.isFinite, target.cornerRadius >= 0,
+           target.cornerRadius <= 1024, target.cornerRadius != cornerRadius {
             cornerRadius = target.cornerRadius
             needsRedraw = true
         }
@@ -645,9 +684,15 @@ final class BorderWindow {
 
         // A window that has been minimised or otherwise ordered out keeps its
         // bounds, so without asking, its border stays on screen with nothing
-        // under it. Skipped while resizing, where the window is visible by
-        // definition and this would be a round trip on the hot path.
-        if !simulated, !sizeChanged, !WS.isOrderedIn(targetWID) {
+        // under it. This used to be skipped whenever the size also changed, on
+        // the assumption that a size change means the window is mid-resize and
+        // therefore visible - but an off-screen window can be resized by its
+        // app too (e.g. a background-space or minimised window relaying out),
+        // and skipping the check let update() rebuild and re-order the border
+        // in anyway, leaving a border frozen at stale coordinates with nothing
+        // under it. Checked unconditionally: update() already does several
+        // window-server round trips, so one more here is not on the hot path.
+        if !simulated, !WS.isOrderedIn(targetWID) {
             hide()
             return
         }
@@ -667,10 +712,10 @@ final class BorderWindow {
             changedScale = updated != scale
         }
 
-        if strips.isEmpty || force || changedScale {
+        if strips.isEmpty || changedScale {
             guard buildStrips(frame: frame, settings: s) else { return }
-        } else if sizeChanged || pendingResync {
-            reshapeStrips(frame: frame, settings: s)
+        } else if sizeChanged || pendingResync || layoutRects != stripLayout(s, frameSize: frame.size).map({ $0.1 }) {
+            guard reshapeStrips(frame: frame, settings: s) else { return }
         } else if frame.origin != windowFrame.origin {
             moveStrips(to: frame)
         }
@@ -725,6 +770,7 @@ final class BorderWindow {
     /// nothing is redrawn because the border's content has not changed.
     func move(targetOrigin: CGPoint, settings: Settings) {
         guard !strips.isEmpty, isOrderedIn, !tooSmall else { return }
+        guard abs(targetOrigin.x) <= 1_000_000, abs(targetOrigin.y) <= 1_000_000 else { hide(); return }
         let s = overrides ?? settings
         let origin = CGPoint(x: targetOrigin.x - s.outset, y: targetOrigin.y - s.outset)
         guard origin != windowFrame.origin else { return }
@@ -735,6 +781,7 @@ final class BorderWindow {
     }
 
     private func moveStrips(to frame: CGRect) {
+        if simulated { windowFrame = frame; return }
         guard let t = Transaction() else { return }
         for strip in strips {
             t.move(strip.wid, to: screenOrigin(of: strip.rect, frame: frame))
@@ -748,15 +795,8 @@ final class BorderWindow {
         OpCounts.hides += 1
         isOrderedIn = false
         appliedOrder = 0
+        guard !simulated else { return }
         for strip in strips { SLSOrderWindow(WS.cid, strip.wid, 0, targetWID) }
-    }
-
-    func show(settings: Settings) {
-        guard !strips.isEmpty, !isOrderedIn, !tooSmall else { return }
-        let s = overrides ?? settings
-        isOrderedIn = true
-        appliedOrder = s.order.rawValue
-        for strip in strips { SLSOrderWindow(WS.cid, strip.wid, s.order.rawValue, targetWID) }
     }
 
     func moveToSpace(_ sid: UInt64) {
@@ -772,6 +812,8 @@ final class BorderWindow {
         if sticky {
             setTags |= WS.Snapshot.tagSticky
             clearTags |= (1 << 45)
+        } else {
+            clearTags |= WS.Snapshot.tagSticky
         }
         for strip in strips {
             SLSSetWindowTags(WS.cid, strip.wid, &setTags, 64)
@@ -790,8 +832,9 @@ final class BorderWindow {
                                                        height: size.height + 2 * s.outset))
         windowFrame = frame
         let px = 2.0
+        guard let pixels = bitmapSize(frame.size) else { return nil }
         guard let bmp = CGContext(data: nil,
-                                  width: Int(frame.width * px), height: Int(frame.height * px),
+                                  width: pixels.width, height: pixels.height,
                                   bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
@@ -827,8 +870,9 @@ final class BorderWindow {
     func composite(showStripOutlines: Bool = true) -> CGImage? {
         let frame = windowFrame
         let px = 2.0
+        guard let pixels = bitmapSize(frame.size) else { return nil }
         guard let out = CGContext(data: nil,
-                                  width: Int(frame.width * px), height: Int(frame.height * px),
+                                  width: pixels.width, height: pixels.height,
                                   bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
